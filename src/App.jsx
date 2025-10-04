@@ -16,8 +16,16 @@ import { createClient } from "@supabase/supabase-js";
 // Read keys injected by Vite/Netlify (must start with VITE_)
 const supabaseUrl = import.meta?.env?.VITE_SUPABASE_URL;
 const supabaseKey = import.meta?.env?.VITE_SUPABASE_ANON_KEY;
+// DEBUG (temporary)
+if (typeof window !== 'undefined') {
+  console.log('ENV check', {
+    VITE_SUPABASE_URL: supabaseUrl,
+    VITE_SUPABASE_ANON_KEY: supabaseKey ? supabaseKey.slice(0, 6) + '…' : supabaseKey
+  });
+}
 // Create the client only when both envs exist (e.g., on Netlify build). Otherwise keep it null
 // and the app will work in local-only mode (no cloud sync/auth).
+console.log('Supabase client:', supabase ? 'OK' : 'NULL');
 const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
 // --- Helper utils ---
