@@ -830,8 +830,16 @@ export default function App() {
               )}
 
               <div className="space-y-2">
-                <label className="text-sm font-medium">Trading date</label>
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-sm font-medium">Trading date</label>
+                  <Button variant="outline" onClick={() => setTradingDate(todayStr())}>Today</Button>
+                </div>
                 <Input type="date" value={tradingDate} onChange={e=>setTradingDate(e.target.value)} />
+                {tradingDate !== todayStr() && (
+                  <div className="text-xs text-amber-500 font-semibold">
+                    Selected date is not today. End Session and End of Day will be saved on this selected date.
+                  </div>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -1169,6 +1177,7 @@ export default function App() {
               <div className="text-xs text-gray-600 leading-relaxed">
                 <p className="mb-2 font-medium text-gray-700">How it works</p>
                 <ul className="list-disc ml-5 space-y-1">
+                  <li><span className="font-semibold">Trading date:</span> End Session and End of Day are saved on the selected date. Use <em>Today</em> to quickly return to the current date.</li>
                   <li><span className="font-semibold">Users & Cloud:</span> sign in to keep your data per user. Data is stored server-side.</li>
                   <li><span className="font-semibold">Payout input:</span> you can type <code>92</code>, <code>0.92</code> or <code>92%</code>. Internally it becomes 0.92.</li>
                   <li><span className="font-semibold">Daily target modes:</span> choose <em>Amount</em> or <em>Percent</em>. In percent mode the target is <code>initial × percent</code>.</li>
