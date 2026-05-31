@@ -101,6 +101,70 @@ function monthMatrix(year, month){
   return cells;
 }
 
+function roundMoney(v){
+  return Math.max(0, Math.round((Number(v) || 0) * 100) / 100);
+}
+
+function getMaxAcceptedLossAmount(mode, value, balance){
+  if (mode === 'off') return Infinity;
+  const n = Number(value);
+  if (!isFinite(n) || n <= 0) return Infinity;
+  if (mode === 'percent') return (Number(balance) || 0) * parsePct(value);
+  return n;
+}
+
+function buildRecoveryPreview({ initialStake, payout, bufferPct, maxAcceptedLossAmount, manualMaxSteps, maxTradeSize }){
+  const p = Number(payout);
+  const init = Number(initialStake) || 0;
+  const maxTrade = Number(maxTradeSize) > 0 ? Number(maxTradeSize) : Infinity;
+  const maxSteps = Number(manualMaxSteps) > 0 ? Number(manualMaxSteps) : Infinity;
+
+  if (p <= 0 || init <= 0) {
+    return { steps: 0, totalLoss: 0, nextStake: 0, reason: 'Set payout and initial trade size.' };
+  }
+
+  let totalLoss = 0;
+  let steps = 0;
+  let nextStake = init;
+  let reason = '';
+
+  while (true) {
+    nextStake = totalLoss <= 0 ? init : (totalLoss * (1 + bufferPct)) / p;
+    nextStake = roundMoney(nextStake);
+
+    if (steps >= maxSteps) { reason = 'Manual max recovery steps reached.'; break; }
+    if (nextStake > maxTrade) { reason = 'Next stake would exceed max trade size.'; break; }
+    if (totalLoss + nextStake > maxAcceptedLossAmount) { reason = 'Next loss would exceed max accepted loss.'; break; }
+
+    totalLoss = roundMoney(totalLoss + nextStake);
+    steps += 1;
+
+    if (steps > 50) { reason = 'Preview stopped at 50 steps.'; break; }
+  }
+
+  return { steps, totalLoss, nextStake, reason };
+}
+
+function summarizeTrades(tradeList){
+  const list = Array.isArray(tradeList) ? tradeList : [];
+  const pnl = roundMoney(list.reduce((sum, t) => sum + Number(t.pnl || 0), 0));
+  const trades = list.length;
+  const wins = list.filter(t => t.result === 'win').length;
+  const losses = list.filter(t => t.result === 'loss').length;
+  const winRate = trades ? Number(((wins / trades) * 100).toFixed(2)) : 0;
+  return { pnl, trades, wins, losses, winRate };
+}
+
+function summarizeSessions(sessionList){
+  const list = Array.isArray(sessionList) ? sessionList : [];
+  const pnl = roundMoney(list.reduce((sum, s) => sum + Number(s.pnl || 0), 0));
+  const trades = list.reduce((sum, s) => sum + Number(s.trades || 0), 0);
+  const wins = list.reduce((sum, s) => sum + Number(s.wins || 0), 0);
+  const losses = list.reduce((sum, s) => sum + Number(s.losses || 0), 0);
+  const winRate = trades ? Number(((wins / trades) * 100).toFixed(2)) : 0;
+  return { pnl, trades, wins, losses, winRate };
+}
+
 export default function App() {
   // ===== Auth state (Supabase) =====
   const cloudEnabled = !!supabase;
@@ -142,6 +206,21 @@ export default function App() {
   const [payoutInput, setPayoutInput] = useState("92"); // user-facing, flexible input
   const [lockAfterTarget, setLockAfterTarget] = useState(true);
   const [customStake, setCustomStake] = useState("");
+
+  // Recovery / Martingale settings
+  const [suggestedMode, setSuggestedMode] = useState("recovery"); // 'recovery' | 'dailyTarget'
+  const [initialTradeSize, setInitialTradeSize] = useState(100);
+  const [recoveryBufferInput, setRecoveryBufferInput] = useState("10");
+  const [maxAcceptedLossMode, setMaxAcceptedLossMode] = useState("off"); // 'off' | 'amount' | 'percent'
+  const [maxAcceptedLossValue, setMaxAcceptedLossValue] = useState("20");
+  const [manualMaxRecoverySteps, setManualMaxRecoverySteps] = useState(4);
+  const [maxTradeSize, setMaxTradeSize] = useState("");
+
+  // Session management
+  const [sessionPreset, setSessionPreset] = useState("London");
+  const [customSessionName, setCustomSessionName] = useState("");
+  const [sessions, setSessions] = useState([]);
+
   const [darkMode, setDarkMode] = useState(false);
 
   // Persist theme
@@ -173,13 +252,16 @@ export default function App() {
 
   const payout = useMemo(() => parsePct(payoutInput), [payoutInput]);
 
+  const activeSessionStats = useMemo(() => summarizeTrades(trades), [trades]);
+  const closedSessionsStats = useMemo(() => summarizeSessions(sessions), [sessions]);
+
   const realizedPnL = useMemo(
-    () => trades.reduce((sum, t) => sum + t.pnl, 0),
-    [trades]
+    () => roundMoney(closedSessionsStats.pnl + activeSessionStats.pnl),
+    [closedSessionsStats.pnl, activeSessionStats.pnl]
   );
 
-  const wins = useMemo(() => trades.filter(t => t.result === "win").length, [trades]);
-  const losses = useMemo(() => trades.filter(t => t.result === "loss").length, [trades]);
+  const wins = useMemo(() => closedSessionsStats.wins + activeSessionStats.wins, [closedSessionsStats.wins, activeSessionStats.wins]);
+  const losses = useMemo(() => closedSessionsStats.losses + activeSessionStats.losses, [closedSessionsStats.losses, activeSessionStats.losses]);
 
   // Losses in the current martingale cycle (since last win)
   const cycleLosses = useMemo(() => {
@@ -190,6 +272,16 @@ export default function App() {
       else break; // reset when last result is a win
     }
     return sum;
+  }, [trades]);
+
+  const currentRecoveryStep = useMemo(() => {
+    let count = 0;
+    for (let i = trades.length - 1; i >= 0; i--) {
+      const t = trades[i];
+      if (t.result === "loss") count += 1;
+      else break;
+    }
+    return count;
   }, [trades]);
 
   // Resolve daily target as an AMOUNT, regardless of input mode
@@ -204,18 +296,57 @@ export default function App() {
     return r;
   }, [targetAmount, realizedPnL]);
 
+  const recoveryBufferPct = useMemo(() => parsePct(recoveryBufferInput), [recoveryBufferInput]);
+
+  const maxAcceptedLossAmount = useMemo(() => {
+    return getMaxAcceptedLossAmount(maxAcceptedLossMode, maxAcceptedLossValue, initialBalance);
+  }, [maxAcceptedLossMode, maxAcceptedLossValue, initialBalance]);
+
+  const rawRecoveryStake = useMemo(() => {
+    const p = Number(payout);
+    const init = Number(initialTradeSize) || 0;
+    if (p <= 0) return 0;
+    if (cycleLosses <= 0) return roundMoney(init);
+    return roundMoney((cycleLosses * (1 + recoveryBufferPct)) / p);
+  }, [payout, initialTradeSize, cycleLosses, recoveryBufferPct]);
+
+  const recoveryPreview = useMemo(() => buildRecoveryPreview({
+    initialStake: initialTradeSize,
+    payout,
+    bufferPct: recoveryBufferPct,
+    maxAcceptedLossAmount,
+    manualMaxSteps: manualMaxRecoverySteps,
+    maxTradeSize,
+  }), [initialTradeSize, payout, recoveryBufferPct, maxAcceptedLossAmount, manualMaxRecoverySteps, maxTradeSize]);
+
+  const recoveryLimitReason = useMemo(() => {
+    if (suggestedMode !== 'recovery') return '';
+    const maxSteps = Number(manualMaxRecoverySteps) > 0 ? Number(manualMaxRecoverySteps) : Infinity;
+    const maxTrade = Number(maxTradeSize) > 0 ? Number(maxTradeSize) : Infinity;
+
+    if (currentRecoveryStep >= maxSteps) return 'Manual max recovery steps reached.';
+    if (rawRecoveryStake > maxTrade) return 'Suggested stake exceeds max trade size.';
+    if (cycleLosses + rawRecoveryStake > maxAcceptedLossAmount) return 'Next loss would exceed max accepted loss.';
+    return '';
+  }, [suggestedMode, manualMaxRecoverySteps, maxTradeSize, currentRecoveryStep, rawRecoveryStake, cycleLosses, maxAcceptedLossAmount]);
+
   const suggestedStake = useMemo(() => {
     const p = Number(payout);
     if (p <= 0) return 0;
 
-    // If target achieved and locked, suggest 0
+    if (suggestedMode === 'recovery') {
+      if (recoveryLimitReason) return 0;
+      return rawRecoveryStake;
+    }
+
+    // Daily Target mode: If target achieved and locked, suggest 0
     if (lockAfterTarget && remainingTarget <= 0) return 0;
 
     // Correct formula: need to reach the daily target from current P&L
     const need = remainingTarget; // already equals max(0, targetAmount - realizedPnL)
     const stake = need / p;
-    return Math.max(0, Math.round(stake * 100) / 100);
-  }, [payout, remainingTarget, lockAfterTarget]);
+    return roundMoney(stake);
+  }, [payout, suggestedMode, recoveryLimitReason, rawRecoveryStake, lockAfterTarget, remainingTarget]);
 
   const currentBalance = useMemo(
     () => Number(initialBalance) + realizedPnL,
@@ -248,7 +379,7 @@ export default function App() {
     setCustomStake("");
   }
 
-  function hardReset() {
+  function resetCurrentDay() {
     setTrades([]);
     setInitialBalance(1000);
     setDailyTarget(50);
@@ -257,10 +388,34 @@ export default function App() {
     setPayoutInput("92");
     setLockAfterTarget(true);
     setCustomStake("");
+    setSuggestedMode("recovery");
+    setInitialTradeSize(100);
+    setRecoveryBufferInput("10");
+    setMaxAcceptedLossMode("off");
+    setMaxAcceptedLossValue("20");
+    setManualMaxRecoverySteps(4);
+    setMaxTradeSize("");
+    setSessions([]);
+    setSessionPreset("London");
+    setCustomSessionName("");
+  }
+
+  function clearAllCalendarData() {
+    setClearConfirmOpen(true);
+  }
+
+  function confirmClearAllCalendarData() {
+    setSummaries({});
+    setTrades([]);
+    setSessions([]);
+    setCustomStake("");
+    setEditingDay(null);
+    setDetailsOpen(false);
+    setClearConfirmOpen(false);
   }
 
   // Derived stats
-  const totalTrades = trades.length;
+  const totalTrades = closedSessionsStats.trades + activeSessionStats.trades;
   const winRate = totalTrades ? (wins / totalTrades) * 100 : 0;
   const dayPct = initialBalance ? (realizedPnL / Number(initialBalance)) * 100 : 0;
 
@@ -339,20 +494,69 @@ export default function App() {
     return map;
   }
 
-  function saveDay({ advance = true } = {}){
-    const dateToSave = tradingDate;
-    const summary = {
+  function buildDaySummary(dateToSave, status, sessionList, activeTradeList){
+    const active = summarizeTrades(activeTradeList);
+    const closed = summarizeSessions(sessionList);
+    const combinedTradesLog = [
+      ...(sessionList || []).flatMap(s => Array.isArray(s.tradesLog) ? s.tradesLog : []),
+      ...(activeTradeList || [])
+    ];
+    const totalPnL = roundMoney(closed.pnl + active.pnl);
+    const total = {
+      trades: closed.trades + active.trades,
+      wins: closed.wins + active.wins,
+      losses: closed.losses + active.losses,
+    };
+    total.winRate = total.trades ? Number(((total.wins / total.trades) * 100).toFixed(2)) : 0;
+
+    return {
       date: dateToSave,
+      status,
       startBalance: Number(initialBalance),
-      endBalance: Number(currentBalance),
-      pnl: Number(realizedPnL),
-      trades: totalTrades,
-      wins, losses,
-      winRate: totalTrades ? Number(((wins/totalTrades)*100).toFixed(2)) : 0,
+      endBalance: roundMoney(Number(initialBalance) + totalPnL),
+      pnl: totalPnL,
+      trades: total.trades,
+      wins: total.wins,
+      losses: total.losses,
+      winRate: total.winRate,
       targetAmount: Number(targetAmount),
       payout: Number(payout),
-      tradesLog: trades.slice(), // ✅ persist full trades of the day
+      sessions: sessionList || [],
+      activeTradesLog: activeTradeList || [],
+      tradesLog: combinedTradesLog,
     };
+  }
+
+  function endSession(){
+    if (!trades.length) return;
+    const stats = summarizeTrades(trades);
+    const label = sessionPreset === 'Custom'
+      ? (customSessionName.trim() || `Session ${sessions.length + 1}`)
+      : sessionPreset;
+    const session = {
+      id: Date.now(),
+      name: label,
+      date: tradingDate,
+      ...stats,
+      tradesLog: trades.slice(),
+    };
+    const nextSessions = [...sessions, session];
+    setSessions(nextSessions);
+    setSummaries(prev => ({
+      ...prev,
+      [tradingDate]: buildDaySummary(tradingDate, 'in_progress', nextSessions, [])
+    }));
+    setTrades([]);
+    setCustomStake("");
+  }
+
+  function saveDay({ advance = true } = {}){
+    const dateToSave = tradingDate;
+    const finalSessions = [...sessions];
+    const activeTradesForSummary = trades.slice();
+    const summary = buildDaySummary(dateToSave, 'final', finalSessions, activeTradesForSummary);
+    const finalEndBalance = summary.endBalance;
+
     setSummaries(prev => {
       let next = { ...prev, [dateToSave]: summary };
       if (recalcForwardOnSave) {
@@ -363,11 +567,12 @@ export default function App() {
 
     // reset state
     setTrades([]);
+    setSessions([]);
     setCustomStake("");
     setEditingDay(null);
 
     if (advance) {
-      if (carryOver) setInitialBalance(Number(currentBalance));
+      if (carryOver) setInitialBalance(Number(finalEndBalance));
       setTradingDate(addDays(dateToSave, 1));
     }
   }
@@ -450,6 +655,7 @@ export default function App() {
   // ---- Day Details / Edit Modal ----
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsDate, setDetailsDate] = useState(null);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
 
   function openDayDetails(date){ setDetailsDate(date); setDetailsOpen(true); }
   function closeDetails(){ setDetailsOpen(false); setDetailsDate(null); }
@@ -459,7 +665,13 @@ export default function App() {
     if (!s) return;
     setTradingDate(date);
     setInitialBalance(Number(s.startBalance) || 0);
-    setTrades(Array.isArray(s.tradesLog) ? s.tradesLog.slice() : []);
+    if (Array.isArray(s.sessions)) {
+      setSessions(s.sessions.slice());
+      setTrades(Array.isArray(s.activeTradesLog) ? s.activeTradesLog.slice() : []);
+    } else {
+      setSessions([]);
+      setTrades(Array.isArray(s.tradesLog) ? s.tradesLog.slice() : []);
+    }
     setEditingDay(date);
     setDetailsOpen(false);
   }
@@ -527,7 +739,18 @@ export default function App() {
     <div className={`app-${darkMode ? 'dark' : 'light'}`}>
       {/* Fallback CSS so dark mode works even if Tailwind dark mode isn't configured in preview */}
       <style>{`
-        .day-cell { min-height: 84px; cursor: pointer; }
+        .day-cell { min-height: 84px; cursor: pointer; transition: background-color .15s ease, border-color .15s ease, transform .12s ease; }
+        .day-cell:hover { transform: translateY(-1px); }
+        .day-cell-positive { background: #dcfce7 !important; border-color: #86efac !important; }
+        .day-cell-negative { background: #fee2e2 !important; border-color: #fca5a5 !important; }
+        .app-light .day-cell.day-cell-positive { background: #dcfce7 !important; border-color: #86efac !important; }
+        .app-light .day-cell.day-cell-negative { background: #fee2e2 !important; border-color: #fca5a5 !important; }
+        .day-cell-positive .day-number,
+        .day-cell-positive .day-amount,
+        .day-cell-positive .day-pnl-text { color: #065f46 !important; font-weight: 700; }
+        .day-cell-negative .day-number,
+        .day-cell-negative .day-amount,
+        .day-cell-negative .day-pnl-text { color: #7f1d1d !important; font-weight: 700; }
 
         /* ========== LIGHT THEME ========== */
         .app-light { background: #f8fafc; color: #111827; }
@@ -540,6 +763,14 @@ export default function App() {
         .app-light .text-gray-900 { color: #111827 !important; }
 
         /* =========== DARK THEME =========== */
+        .app-dark .day-cell-positive { background: #064e3b !important; border-color: #10b981 !important; }
+        .app-dark .day-cell-negative { background: #7f1d1d !important; border-color: #f43f5e !important; }
+        .app-dark .day-cell-positive .day-number,
+        .app-dark .day-cell-positive .day-amount,
+        .app-dark .day-cell-positive .day-pnl-text,
+        .app-dark .day-cell-negative .day-number,
+        .app-dark .day-cell-negative .day-amount,
+        .app-dark .day-cell-negative .day-pnl-text { color: #ffffff !important; font-weight: 700; }
         .app-dark { background-color: #0b1220; color: #f3f4f6; }
         .app-dark label, .app-dark h1, .app-dark span, .app-dark div, .app-dark th, .app-dark td { color: #e5e7eb !important; }
         .app-dark input { background-color: #111827 !important; color: #f3f4f6 !important; border-color: #374151 !important; }
@@ -551,6 +782,9 @@ export default function App() {
         /* Ensure inputs never overflow their container */
         input { max-width: 100% !important; box-sizing: border-box; }
         .app-light .card-content, .app-dark .card-content { overflow: hidden; }
+
+        .app-dark .day-cell.day-cell-positive { background: #064e3b !important; border-color: #10b981 !important; }
+        .app-dark .day-cell.day-cell-negative { background: #7f1d1d !important; border-color: #f43f5e !important; }
 
         /* modal */
         .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center; z-index: 50; }
@@ -653,6 +887,64 @@ export default function App() {
                 </div>
               </div>
 
+              <div className="space-y-3 rounded-2xl bg-white p-4 border border-gray-200">
+                <div>
+                  <label className="text-sm font-medium">Suggested stake mode</label>
+                  <div className="flex items-center gap-2 mt-2">
+                    <Button variant={suggestedMode === "recovery" ? "default" : "outline"} onClick={() => setSuggestedMode("recovery")}>Recovery</Button>
+                    <Button variant={suggestedMode === "dailyTarget" ? "default" : "outline"} onClick={() => setSuggestedMode("dailyTarget")}>Daily Target</Button>
+                  </div>
+                </div>
+
+                {suggestedMode === "recovery" && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs font-medium">Initial trade size</label>
+                        <Input type="number" inputMode="decimal" value={initialTradeSize} onChange={e => setInitialTradeSize(Number(e.target.value))} />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium">Recovery buffer %</label>
+                        <Input type="text" value={recoveryBufferInput} onChange={e => setRecoveryBufferInput(e.target.value)} placeholder="10 or 10%" />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-medium">Max accepted loss</label>
+                      <div className="flex items-center gap-2 mt-2">
+                        <Button variant={maxAcceptedLossMode === "off" ? "default" : "outline"} onClick={() => setMaxAcceptedLossMode("off")}>Off</Button>
+                        <Button variant={maxAcceptedLossMode === "amount" ? "default" : "outline"} onClick={() => setMaxAcceptedLossMode("amount")}>Amount</Button>
+                        <Button variant={maxAcceptedLossMode === "percent" ? "default" : "outline"} onClick={() => setMaxAcceptedLossMode("percent")}>Percent</Button>
+                      </div>
+                      {maxAcceptedLossMode !== "off" && (
+                        <div className="mt-2 flex items-center gap-2">
+                          <Input type="text" value={maxAcceptedLossValue} onChange={e => setMaxAcceptedLossValue(e.target.value)} placeholder={maxAcceptedLossMode === 'percent' ? '20 or 20%' : '2000'} />
+                          <span className="text-xs">Limit: {Number.isFinite(maxAcceptedLossAmount) ? num(maxAcceptedLossAmount) : 'Off'}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs font-medium">Manual max recovery steps</label>
+                        <Input type="number" inputMode="numeric" value={manualMaxRecoverySteps} onChange={e => setManualMaxRecoverySteps(Number(e.target.value))} />
+                      </div>
+                      <div>
+                        <label className="text-xs font-medium">Max trade size</label>
+                        <Input type="number" inputMode="decimal" value={maxTradeSize} onChange={e => setMaxTradeSize(e.target.value)} placeholder="Off" />
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-gray-200 p-3 text-xs space-y-1">
+                      <div className="font-semibold">Recovery Risk Preview</div>
+                      <div>Estimated capacity: <b>{recoveryPreview.steps}</b> failed step(s)</div>
+                      <div>Estimated total loss if all fail: <b>{num(recoveryPreview.totalLoss)}</b></div>
+                      {recoveryPreview.reason && <div>Limit reason: <b>{recoveryPreview.reason}</b></div>}
+                    </div>
+                  </div>
+                )}
+              </div>
+
               <div className="flex items-center justify-between py-2">
                 <div>
                   <div className="text-sm font-medium">Stop when target is hit</div>
@@ -669,13 +961,19 @@ export default function App() {
                 <div className="rounded-2xl bg-white p-4 border border-gray-200">
                   <div className="text-xs">Cycle losses (to recover)</div>
                   <div className="text-2xl font-semibold">{num(cycleLosses)}</div>
+                  {suggestedMode === 'recovery' && <div className="text-xs mt-1">Step {currentRecoveryStep + 1}{Number(manualMaxRecoverySteps) > 0 ? ` / ${manualMaxRecoverySteps}` : ''}</div>}
                 </div>
               </div>
 
               <div className="space-y-2">
                 <label className="text-sm font-medium">Suggested next position (auto)</label>
                 <Input value={suggestedStake} readOnly />
-                <div className="text-xs">Formula: (Target − Realized P&L) / Payout</div>
+                <div className="text-xs">
+                  {suggestedMode === 'recovery'
+                    ? 'Recovery formula: (Cycle losses × (1 + buffer %)) / payout. If no cycle loss, it uses Initial trade size.'
+                    : 'Daily Target formula: (Target − Realized P&L) / Payout'}
+                </div>
+                {recoveryLimitReason && <div className="text-xs text-rose-400 font-semibold">Recovery limit reached: {recoveryLimitReason}</div>}
               </div>
 
               <div className="space-y-2">
@@ -701,9 +999,41 @@ export default function App() {
 
               <div className="flex gap-2">
                 <Button variant="secondary" onClick={resetDay}>
-                  <RotateCcw className="h-4 w-4 mr-2" /> Reset trades (today)
+                  <RotateCcw className="h-4 w-4 mr-2" /> Reset active session
                 </Button>
-                <Button variant="outline" onClick={hardReset}>Hard reset</Button>
+                <Button variant="outline" onClick={resetCurrentDay}>Reset current day</Button>
+              </div>
+
+              {/* Sessions */}
+              <div className="border-t border-gray-200 pt-4 mt-2 space-y-3">
+                <div className="font-semibold text-sm">Sessions</div>
+                <div className="flex flex-wrap gap-2">
+                  {['Morning','London','New York','Evening','Custom'].map(name => (
+                    <Button key={name} variant={sessionPreset === name ? 'default' : 'outline'} onClick={() => setSessionPreset(name)}>{name}</Button>
+                  ))}
+                </div>
+                {sessionPreset === 'Custom' && (
+                  <Input value={customSessionName} onChange={e=>setCustomSessionName(e.target.value)} placeholder="Custom session name" />
+                )}
+                <Button variant="outline" onClick={endSession} disabled={!trades.length}>
+                  <CalendarIcon className="h-4 w-4 mr-2" /> End Session
+                </Button>
+                <div className="rounded-lg border border-gray-200 p-3 text-xs space-y-1">
+                  <div><b>Closed sessions:</b> {sessions.length}</div>
+                  <div><b>Closed sessions PnL:</b> {num(closedSessionsStats.pnl)}</div>
+                  <div><b>Active session PnL:</b> {num(activeSessionStats.pnl)}</div>
+                  <div><b>Current day total:</b> {num(realizedPnL)}</div>
+                </div>
+                {sessions.length > 0 && (
+                  <div className="space-y-2 text-xs">
+                    {sessions.map((s, idx) => (
+                      <div key={s.id || idx} className="rounded-lg border border-gray-200 p-2 flex items-center justify-between gap-2">
+                        <div><b>{idx + 1}. {s.name}</b><br />{s.trades} trades | {s.wins}W / {s.losses}L</div>
+                        <div className={s.pnl >= 0 ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>{s.pnl >= 0 ? '+' : ''}{num(s.pnl)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* End of Day */}
@@ -724,6 +1054,9 @@ export default function App() {
                     <CalendarIcon className="h-4 w-4 mr-2" /> Τέλος ημέρας (save to calendar)
                   </Button>
                 )}
+                <Button variant="destructive" onClick={clearAllCalendarData}>
+                  <Trash2 className="h-4 w-4 mr-2" /> Clear all calendar data
+                </Button>
               </div>
             </CardContent>
           </Card>
@@ -768,15 +1101,19 @@ export default function App() {
                     {calCells.map((c, idx)=>{
                       const s = summaries[c.iso];
                       const pnl = s?.pnl ?? null;
-                      const pnlClass = pnl==null ? 'text-gray-500' : (pnl>=0 ? 'text-emerald-500' : 'text-rose-500');
+                      const toneClass = s ? (Number(pnl) >= 0 ? 'day-cell-positive' : 'day-cell-negative') : '';
+                      const monthClass = c.inMonth ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-200 opacity-60';
                       return (
-                        <div key={idx} className={`day-cell border rounded-lg p-2 ${c.inMonth? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-200 opacity-60'}`} onClick={()=> s && openDayDetails(c.iso)}>
+                        <div key={idx} className={`day-cell border rounded-lg p-2 ${monthClass} ${toneClass}`} onClick={()=> s && openDayDetails(c.iso)}>
                           <div className="text-xs flex items-center justify-between">
-                            <span className="font-medium">{c.day}</span>
-                            {s && <span className={`text-[10px] ${pnl>=0?'text-emerald-500':'text-rose-500'}`}>{num(pnl)}</span>}
+                            <span className="day-number font-medium">{c.day}</span>
+                            {s && <span className="day-amount text-[10px]">{num(pnl)}</span>}
                           </div>
                           {s && (
-                            <div className={`mt-2 text-xs ${pnlClass}`}>{pnl>=0?'+':''}{num(pnl)} PnL</div>
+                            <>
+                              <div className="day-pnl-text mt-2 text-xs">{pnl>=0?'+':''}{num(pnl)} PnL</div>
+                              <div className="day-status mt-1 text-[10px] uppercase tracking-wide">{s.status === 'final' ? 'Final' : 'In progress'}</div>
+                            </>
                           )}
                         </div>
                       );
@@ -835,8 +1172,12 @@ export default function App() {
                   <li><span className="font-semibold">Users & Cloud:</span> sign in to keep your data per user. Data is stored server-side.</li>
                   <li><span className="font-semibold">Payout input:</span> you can type <code>92</code>, <code>0.92</code> or <code>92%</code>. Internally it becomes 0.92.</li>
                   <li><span className="font-semibold">Daily target modes:</span> choose <em>Amount</em> or <em>Percent</em>. In percent mode the target is <code>initial × percent</code>.</li>
-                  <li><span className="font-semibold">Suggested position:</span> <code>(Target − RealizedPnL) / Payout</code> (i.e., win once to reach today's target from the current P&L).</li>
-                  <li><span className="font-semibold">End of day:</span> saves date, balances, PnL and full trades log to calendar. Click a day to <em>view</em> or <em>edit</em>.</li>
+                  <li><span className="font-semibold">Suggested position:</span> choose <em>Recovery Mode</em> or <em>Daily Target Mode</em>. Recovery uses <code>(Cycle losses × (1 + buffer %)) / payout</code>; Daily Target uses <code>(Target − RealizedPnL) / Payout</code>.</li>
+                  <li><span className="font-semibold">Reset active session:</span> clears only the current active trades.</li>
+                  <li><span className="font-semibold">Reset current day:</span> clears today's workspace/settings but does not delete saved calendar data.</li>
+                  <li><span className="font-semibold">Clear all calendar data:</span> deletes all saved days and chart history after confirmation.</li>
+                  <li><span className="font-semibold">End Session:</span> saves the current session as in-progress, updates the calendar, and clears the active trades for the next session.</li>
+                  <li><span className="font-semibold">End of day:</span> saves the day as final with all sessions, balances, PnL and full trades log. Click a day to <em>view</em> or <em>edit</em>.</li>
                 </ul>
               </div>
             </CardContent>
@@ -862,6 +1203,18 @@ export default function App() {
                 <div>PnL: <b className={details.pnl>=0? 'text-emerald-400':'text-rose-400'}>{num(details.pnl)}</b></div>
                 <div>Trades: <b>{details.trades}</b> (wins {details.wins} / losses {details.losses})</div>
                 <div>Win rate: <b>{num(details.winRate,2)}%</b></div>
+                <div>Status: <b>{details.status === 'final' ? 'Final' : 'In progress'}</b></div>
+                {Array.isArray(details.sessions) && details.sessions.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    <div className="font-semibold">Sessions</div>
+                    {details.sessions.map((s, idx) => (
+                      <div key={s.id || idx} className="rounded-lg border border-gray-200 p-2 flex items-center justify-between gap-2">
+                        <div><b>{idx + 1}. {s.name}</b><br />{s.trades} trades | {s.wins}W / {s.losses}L | Win rate {num(s.winRate,2)}%</div>
+                        <div className={s.pnl >= 0 ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>{s.pnl >= 0 ? '+' : ''}{num(s.pnl)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -878,6 +1231,27 @@ export default function App() {
                 This day was saved without a trades log. Reopening will start with an empty list of trades. You can re-record only the adjustments you need and save again.
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {clearConfirmOpen && (
+        <div className="modal-backdrop" onClick={()=>setClearConfirmOpen(false)}>
+          <div className="modal-card" onClick={e=>e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="font-semibold text-rose-500">Clear all calendar data?</div>
+              <Button variant="outline" onClick={()=>setClearConfirmOpen(false)}><X className="h-4 w-4"/></Button>
+            </div>
+            <div className="text-sm space-y-2">
+              <div>This will permanently delete all saved calendar days, sessions and chart history.</div>
+              <div className="font-semibold">This action cannot be undone.</div>
+            </div>
+            <div className="flex items-center gap-2 mt-5">
+              <Button variant="outline" onClick={()=>setClearConfirmOpen(false)}>Cancel</Button>
+              <Button variant="destructive" onClick={confirmClearAllCalendarData}>
+                <Trash2 className="h-4 w-4 mr-2" /> Yes, clear all data
+              </Button>
+            </div>
           </div>
         </div>
       )}
