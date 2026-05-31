@@ -101,8 +101,12 @@ function monthMatrix(year, month){
   return cells;
 }
 
+function roundSignedMoney(v){
+  return Math.round((Number(v) || 0) * 100) / 100;
+}
+
 function roundMoney(v){
-  return Math.max(0, Math.round((Number(v) || 0) * 100) / 100);
+  return Math.max(0, roundSignedMoney(v));
 }
 
 function getMaxAcceptedLossAmount(mode, value, balance){
@@ -147,7 +151,7 @@ function buildRecoveryPreview({ initialStake, payout, bufferPct, maxAcceptedLoss
 
 function summarizeTrades(tradeList){
   const list = Array.isArray(tradeList) ? tradeList : [];
-  const pnl = roundMoney(list.reduce((sum, t) => sum + Number(t.pnl || 0), 0));
+  const pnl = roundSignedMoney(list.reduce((sum, t) => sum + Number(t.pnl || 0), 0));
   const trades = list.length;
   const wins = list.filter(t => t.result === 'win').length;
   const losses = list.filter(t => t.result === 'loss').length;
@@ -157,7 +161,7 @@ function summarizeTrades(tradeList){
 
 function summarizeSessions(sessionList){
   const list = Array.isArray(sessionList) ? sessionList : [];
-  const pnl = roundMoney(list.reduce((sum, s) => sum + Number(s.pnl || 0), 0));
+  const pnl = roundSignedMoney(list.reduce((sum, s) => sum + Number(s.pnl || 0), 0));
   const trades = list.reduce((sum, s) => sum + Number(s.trades || 0), 0);
   const wins = list.reduce((sum, s) => sum + Number(s.wins || 0), 0);
   const losses = list.reduce((sum, s) => sum + Number(s.losses || 0), 0);
@@ -256,7 +260,7 @@ export default function App() {
   const closedSessionsStats = useMemo(() => summarizeSessions(sessions), [sessions]);
 
   const realizedPnL = useMemo(
-    () => roundMoney(closedSessionsStats.pnl + activeSessionStats.pnl),
+    () => roundSignedMoney(closedSessionsStats.pnl + activeSessionStats.pnl),
     [closedSessionsStats.pnl, activeSessionStats.pnl]
   );
 
@@ -501,7 +505,7 @@ export default function App() {
       ...(sessionList || []).flatMap(s => Array.isArray(s.tradesLog) ? s.tradesLog : []),
       ...(activeTradeList || [])
     ];
-    const totalPnL = roundMoney(closed.pnl + active.pnl);
+    const totalPnL = roundSignedMoney(closed.pnl + active.pnl);
     const total = {
       trades: closed.trades + active.trades,
       wins: closed.wins + active.wins,
@@ -513,7 +517,7 @@ export default function App() {
       date: dateToSave,
       status,
       startBalance: Number(initialBalance),
-      endBalance: roundMoney(Number(initialBalance) + totalPnL),
+      endBalance: roundSignedMoney(Number(initialBalance) + totalPnL),
       pnl: totalPnL,
       trades: total.trades,
       wins: total.wins,
