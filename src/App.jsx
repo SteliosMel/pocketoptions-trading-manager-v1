@@ -40,6 +40,17 @@ function toPctStr(p) {
   return `${(Number(p) * 100).toFixed(2)}%`;
 }
 
+function returnPct(pnl, startBalance){
+  const base = Number(startBalance) || 0;
+  if (!base) return 0;
+  return (Number(pnl) / base) * 100;
+}
+
+function signedPctStr(value){
+  const n = Number(value) || 0;
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+}
+
 function todayStr() {
   const d = new Date();
   const m = String(d.getMonth()+1).padStart(2,'0');
@@ -356,6 +367,22 @@ export default function App() {
     () => Number(initialBalance) + realizedPnL,
     [initialBalance, realizedPnL]
   );
+
+  const activeStakeForProjection = useMemo(() => {
+    const custom = Number(customStake);
+    if (customStake !== "" && isFinite(custom) && custom > 0) return custom;
+    return Number(suggestedStake) || 0;
+  }, [customStake, suggestedStake]);
+
+  const expectedProfitPerWin = useMemo(() => {
+    return roundSignedMoney(activeStakeForProjection * Number(payout || 0));
+  }, [activeStakeForProjection, payout]);
+
+  const winsNeededToTarget = useMemo(() => {
+    if (remainingTarget <= 0) return 0;
+    if (expectedProfitPerWin <= 0) return Infinity;
+    return Math.ceil(remainingTarget / expectedProfitPerWin);
+  }, [remainingTarget, expectedProfitPerWin]);
 
   function addTrade(result) {
     const p = Number(payout);
@@ -1000,6 +1027,17 @@ export default function App() {
                 <div className="text-xs">If provided, this amount will be used for the next Win/Loss action.</div>
               </div>
 
+              <div className="rounded-lg border border-gray-200 p-3 text-xs space-y-1">
+                <div className="font-semibold">Target Projection</div>
+                <div>Stake used for projection: <b>{num(activeStakeForProjection)}</b></div>
+                <div>Expected profit per win: <b>{num(expectedProfitPerWin)}</b></div>
+                {remainingTarget <= 0 ? (
+                  <div className="text-emerald-400 font-semibold">Target reached</div>
+                ) : (
+                  <div>Wins needed to target: <b>{Number.isFinite(winsNeededToTarget) ? winsNeededToTarget : '—'}</b></div>
+                )}
+              </div>
+
               <div className="flex gap-2 pt-1">
                 <Button className="flex-1" onClick={() => addTrade("win")}>
                   <CheckCircle className="h-4 w-4 mr-2" /> Win
@@ -1124,6 +1162,7 @@ export default function App() {
                           {s && (
                             <>
                               <div className="day-pnl-text mt-2 text-xs">{pnl>=0?'+':''}{num(pnl)} PnL</div>
+                              <div className="day-pnl-text mt-1 text-[10px]">{signedPctStr(returnPct(pnl, s.startBalance))}</div>
                               <div className="day-status mt-1 text-[10px] uppercase tracking-wide">{s.status === 'final' ? 'Final' : 'In progress'}</div>
                             </>
                           )}
@@ -1186,6 +1225,8 @@ export default function App() {
                   <li><span className="font-semibold">Payout input:</span> you can type <code>92</code>, <code>0.92</code> or <code>92%</code>. Internally it becomes 0.92.</li>
                   <li><span className="font-semibold">Daily target modes:</span> choose <em>Amount</em> or <em>Percent</em>. In percent mode the target is <code>initial × percent</code>.</li>
                   <li><span className="font-semibold">Suggested position:</span> choose <em>Recovery Mode</em> or <em>Daily Target Mode</em>. Recovery uses <code>(Cycle losses × (1 + buffer %)) / payout</code>; Daily Target uses <code>(Target − RealizedPnL) / Payout</code>.</li>
+                  <li><span className="font-semibold">Target Projection:</span> shows expected profit per win and how many wins are needed to hit the daily target using the suggested or custom stake.</li>
+                  <li><span className="font-semibold">Day return %:</span> saved calendar days show the PnL percentage relative to the start balance of that day.</li>
                   <li><span className="font-semibold">Reset active session:</span> clears only the current active trades.</li>
                   <li><span className="font-semibold">Reset current day:</span> clears today's workspace/settings but does not delete saved calendar data.</li>
                   <li><span className="font-semibold">Clear all calendar data:</span> deletes all saved days and chart history after confirmation.</li>
@@ -1214,6 +1255,7 @@ export default function App() {
                 <div>Start balance: <b>{num(details.startBalance)}</b></div>
                 <div>End balance: <b>{num(details.endBalance)}</b></div>
                 <div>PnL: <b className={details.pnl>=0? 'text-emerald-400':'text-rose-400'}>{num(details.pnl)}</b></div>
+                <div>Day return: <b className={details.pnl>=0? 'text-emerald-400':'text-rose-400'}>{signedPctStr(returnPct(details.pnl, details.startBalance))}</b></div>
                 <div>Trades: <b>{details.trades}</b> (wins {details.wins} / losses {details.losses})</div>
                 <div>Win rate: <b>{num(details.winRate,2)}%</b></div>
                 <div>Status: <b>{details.status === 'final' ? 'Final' : 'In progress'}</b></div>
@@ -1222,7 +1264,7 @@ export default function App() {
                     <div className="font-semibold">Sessions</div>
                     {details.sessions.map((s, idx) => (
                       <div key={s.id || idx} className="rounded-lg border border-gray-200 p-2 flex items-center justify-between gap-2">
-                        <div><b>{idx + 1}. {s.name}</b><br />{s.trades} trades | {s.wins}W / {s.losses}L | Win rate {num(s.winRate,2)}%</div>
+                        <div><b>{idx + 1}. {s.name}</b><br />{s.trades} trades | {s.wins}W / {s.losses}L | Win rate {num(s.winRate,2)}% | Return {signedPctStr(returnPct(s.pnl, details.startBalance))}</div>
                         <div className={s.pnl >= 0 ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>{s.pnl >= 0 ? '+' : ''}{num(s.pnl)}</div>
                       </div>
                     ))}
