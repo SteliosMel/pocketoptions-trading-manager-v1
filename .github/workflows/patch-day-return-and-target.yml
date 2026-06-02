@@ -1,0 +1,163 @@
+name: Patch day return and target projection
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/patch-day-return-and-target.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Patch src/App.jsx
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/App.jsx')
+          text = path.read_text(encoding='utf-8')
+
+          def replace_once(src, old, new, label):
+              if new in src:
+                  print(f'{label}: already applied')
+                  return src
+              if old not in src:
+                  raise SystemExit(f'Missing expected block for {label}')
+              print(f'{label}: applied')
+              return src.replace(old, new, 1)
+
+          old = '''function toPctStr(p) {
+  return `${(Number(p) * 100).toFixed(2)}%`;
+}
+'''
+          new = '''function toPctStr(p) {
+  return `${(Number(p) * 100).toFixed(2)}%`;
+}
+
+function returnPct(pnl, startBalance){
+  const base = Number(startBalance) || 0;
+  if (!base) return 0;
+  return (Number(pnl) / base) * 100;
+}
+
+function signedPctStr(value){
+  const n = Number(value) || 0;
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
+}
+'''
+          text = replace_once(text, old, new, 'helper percentage functions')
+
+          old = '''  const currentBalance = useMemo(
+    () => Number(initialBalance) + realizedPnL,
+    [initialBalance, realizedPnL]
+  );
+'''
+          new = '''  const currentBalance = useMemo(
+    () => Number(initialBalance) + realizedPnL,
+    [initialBalance, realizedPnL]
+  );
+
+  const activeStakeForProjection = useMemo(() => {
+    const custom = Number(customStake);
+    if (customStake !== "" && isFinite(custom) && custom > 0) return custom;
+    return Number(suggestedStake) || 0;
+  }, [customStake, suggestedStake]);
+
+  const expectedProfitPerWin = useMemo(() => {
+    return roundSignedMoney(activeStakeForProjection * Number(payout || 0));
+  }, [activeStakeForProjection, payout]);
+
+  const winsNeededToTarget = useMemo(() => {
+    if (remainingTarget <= 0) return 0;
+    if (expectedProfitPerWin <= 0) return Infinity;
+    return Math.ceil(remainingTarget / expectedProfitPerWin);
+  }, [remainingTarget, expectedProfitPerWin]);
+'''
+          text = replace_once(text, old, new, 'target projection calculations')
+
+          old = '''              <div className="space-y-2">
+                <label className="text-sm font-medium">Or set custom stake</label>
+                <Input
+                  type="number"
+                  inputMode="decimal"
+                  placeholder="Optional override"
+                  value={customStake}
+                  onChange={e => setCustomStake(e.target.value)}
+                />
+                <div className="text-xs">If provided, this amount will be used for the next Win/Loss action.</div>
+              </div>
+'''
+          new = '''              <div className="space-y-2">
+                <label className="text-sm font-medium">Or set custom stake</label>
+                <Input
+                  type="number"
+                  inputMode="decimal"
+                  placeholder="Optional override"
+                  value={customStake}
+                  onChange={e => setCustomStake(e.target.value)}
+                />
+                <div className="text-xs">If provided, this amount will be used for the next Win/Loss action.</div>
+              </div>
+
+              <div className="rounded-lg border border-gray-200 p-3 text-xs space-y-1">
+                <div className="font-semibold">Target Projection</div>
+                <div>Stake used for projection: <b>{num(activeStakeForProjection)}</b></div>
+                <div>Expected profit per win: <b>{num(expectedProfitPerWin)}</b></div>
+                {remainingTarget <= 0 ? (
+                  <div className="text-emerald-400 font-semibold">Target reached</div>
+                ) : (
+                  <div>Wins needed to target: <b>{Number.isFinite(winsNeededToTarget) ? winsNeededToTarget : '—'}</b></div>
+                )}
+              </div>
+'''
+          text = replace_once(text, old, new, 'target projection UI box')
+
+          old = '''                              <div className="day-pnl-text mt-2 text-xs">{pnl>=0?'+':''}{num(pnl)} PnL</div>
+                              <div className="day-status mt-1 text-[10px] uppercase tracking-wide">{s.status === 'final' ? 'Final' : 'In progress'}</div>
+'''
+          new = '''                              <div className="day-pnl-text mt-2 text-xs">{pnl>=0?'+':''}{num(pnl)} PnL</div>
+                              <div className="day-pnl-text mt-1 text-[10px]">{signedPctStr(returnPct(pnl, s.startBalance))}</div>
+                              <div className="day-status mt-1 text-[10px] uppercase tracking-wide">{s.status === 'final' ? 'Final' : 'In progress'}</div>
+'''
+          text = replace_once(text, old, new, 'calendar day return percentage')
+
+          old = '''                <div>PnL: <b className={details.pnl>=0? 'text-emerald-400':'text-rose-400'}>{num(details.pnl)}</b></div>
+                <div>Trades: <b>{details.trades}</b> (wins {details.wins} / losses {details.losses})</div>
+'''
+          new = '''                <div>PnL: <b className={details.pnl>=0? 'text-emerald-400':'text-rose-400'}>{num(details.pnl)}</b></div>
+                <div>Day return: <b className={details.pnl>=0? 'text-emerald-400':'text-rose-400'}>{signedPctStr(returnPct(details.pnl, details.startBalance))}</b></div>
+                <div>Trades: <b>{details.trades}</b> (wins {details.wins} / losses {details.losses})</div>
+'''
+          text = replace_once(text, old, new, 'day details return percentage')
+
+          old = '''                        <div><b>{idx + 1}. {s.name}</b><br />{s.trades} trades | {s.wins}W / {s.losses}L | Win rate {num(s.winRate,2)}%</div>
+'''
+          new = '''                        <div><b>{idx + 1}. {s.name}</b><br />{s.trades} trades | {s.wins}W / {s.losses}L | Win rate {num(s.winRate,2)}% | Return {signedPctStr(returnPct(s.pnl, details.startBalance))}</div>
+'''
+          text = replace_once(text, old, new, 'session return percentage in day details')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit patch if changed
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/App.jsx
+          git commit -m "Add day return percentage and wins needed to target"
+          git push
