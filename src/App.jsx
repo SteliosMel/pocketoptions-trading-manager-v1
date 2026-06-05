@@ -384,6 +384,36 @@ export default function App() {
     return Math.ceil(remainingTarget / expectedProfitPerWin);
   }, [remainingTarget, expectedProfitPerWin]);
 
+
+  const dailyTradeLog = useMemo(() => [
+    ...sessions.flatMap(s => Array.isArray(s.tradesLog) ? s.tradesLog : []),
+    ...trades,
+  ], [sessions, trades]);
+
+  const winBreakdown = useMemo(() => {
+    let cleanWins = 0;
+    let recoveryWins = 0;
+    let recoveryOpen = false;
+
+    for (const trade of dailyTradeLog) {
+      if (trade.result === "loss") {
+        recoveryOpen = true;
+      } else if (trade.result === "win") {
+        if (recoveryOpen) recoveryWins += 1;
+        else cleanWins += 1;
+        recoveryOpen = false;
+      }
+    }
+
+    return { cleanWins, recoveryWins };
+  }, [dailyTradeLog]);
+
+  const targetProgressPct = useMemo(() => {
+    const target = Number(targetAmount) || 0;
+    if (target <= 0) return 0;
+    return Math.max(0, Math.min(100, (Number(realizedPnL) / target) * 100));
+  }, [targetAmount, realizedPnL]);
+
   function addTrade(result) {
     const p = Number(payout);
     let stake = customStake !== "" ? Number(customStake) : suggestedStake;
@@ -1031,10 +1061,15 @@ export default function App() {
                 <div className="font-semibold">Target Projection</div>
                 <div>Stake used for projection: <b>{num(activeStakeForProjection)}</b></div>
                 <div>Expected profit per win: <b>{num(expectedProfitPerWin)}</b></div>
+                <div className="pt-1">Today: <b>{totalTrades}</b> trades | <b>{wins}</b> wins | <b>{losses}</b> losses</div>
+                <div>Clean wins: <b>{winBreakdown.cleanWins}</b></div>
+                <div>Recovery wins: <b>{winBreakdown.recoveryWins}</b></div>
+                <div>Target progress: <b>{num(targetProgressPct, 2)}%</b></div>
+                <div>Remaining profit: <b>{num(remainingTarget)}</b></div>
                 {remainingTarget <= 0 ? (
                   <div className="text-emerald-400 font-semibold">Target reached</div>
                 ) : (
-                  <div>Wins needed to target: <b>{Number.isFinite(winsNeededToTarget) ? winsNeededToTarget : '—'}</b></div>
+                  <div>Wins still needed at current stake: <b>{Number.isFinite(winsNeededToTarget) ? winsNeededToTarget : '—'}</b></div>
                 )}
               </div>
 
